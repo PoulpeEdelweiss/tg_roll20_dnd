@@ -2,7 +2,15 @@
 require('dotenv').config();
 const TelegramBot = require('node-telegram-bot-api');
 const axios = require('axios');
-const { getStartKeyboard, getDiceKeyboard, getBackKeyboard } = require('./handlers/keyboard');
+const { 
+  getStartKeyboard, 
+  getDiceKeyboard, 
+  getBackKeyboard,
+  getDiceCountKeyboard,
+  getDiceTypeKeyboard, 
+  getDiceModeKeyboard,
+  getDiceResultKeyboard
+} = require('./handlers/keyboard');
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
 const bot = new TelegramBot(token, { polling: true });
@@ -274,6 +282,15 @@ bot.on('message', (msg) => {
   // Игнорируем, если это не текст или если сообщение от бота
   if (!msg.text || msg.from?.is_bot) return;
   
+    const text = msg.text.trim();
+  
+  // Проверяем, является ли сообщение кастомным выражением кубиков
+  // Паттерн: содержит "d", цифры, +, -, пробелы
+  if (/[d+\-\s\d]/i.test(text) && text.toLowerCase().includes('d')) {
+    const handled = handleCustomDiceInput(msg.chat.id, text);
+    if (handled) return; // Если выражение распознано — не обрабатываем дальше
+  }
+
   if (/^(\d+)d(\d+)$/i.test(msg.text)) {
     const res = rollDice(msg.text);
     bot.sendMessage(msg.chat.id, `🎲 Результат: <b>${res.total}</b>\n📊 Броски: [${res.rolls.join(', ')}]`, { 
@@ -344,8 +361,177 @@ bot.on('callback_query', async (cb) => {
     return safeEdit(chatId, msgId, '🎲 Выберите функцию:', { reply_markup: getStartKeyboard() });
   }
 
-  // === МЕНЮ КУБИКОВ ===
-  if (data === 'dice_menu' || data.startsWith('dice_')) {
+  // =============================================================================
+  // ОБРАБОТКА ПОШАГОВОГО ВЫБОРА КУБИКОВ
+  // =============================================================================
+  
+  // Начало выбора кубиков
+  if (data === 'dice_menu') {
+    userState[chatId] = { step: 'dice_count' };
+    return bot.sendMessage(chatId, '🎲 <b>Шаг 1/3:</b> Выберите количество кубиков:', {
+      parse_mode: 'HTML',
+      reply_markup: getDiceCountKeyboard()
+    });
+  }
+  
+  // Выбор количества кубиков
+  if (data.startsWith('dice_count_')) {
+    const count = parseInt(data.split('_')[2]);
+    if (!userState[chatId]) userState[chatId] = {};
+    userState[chatId].diceCount = count;
+    userState[chatId].step = 'dice_type';
+    
+    return bot.sendMessage(chatId, `🎲 <b>Шаг 2/3:</b> Выберите тип кубика (выбрано: ${count} шт.):`, {
+      parse_mode: 'HTML',
+      reply_markup: getDiceTypeKeyboard()
+    });
+  }
+  
+  // Выбор типа кубика
+  if (data.startsWith('dice_type_')) {
+    const sides = parseInt(data.split('_')[2]);
+    if (!userState[chatId]) userState[chatId] = {};
+    userState[chatId].diceSides = sides;
+    userState[chatId].step = 'dice_mode';
+    
+    return bot.sendMessage(chatId, `🎲 <b>Шаг 3/3:</b> Выберите режим броска (выбрано: ${userState[chatId].diceCount}d${sides}):`, {
+      parse_mode: 'HTML',
+      reply_markup: getDiceModeKeyboard()
+    });
+  }
+  
+  // Выбор режима броска — ФИНАЛЬНЫЙ ШАГ
+  // if (data.startsWith('dice_mode_')) {
+  //   const mode = data.split('_')[2]; // normal, adv, dis
+  //   const state = userState[chatId];
+    
+  //   if (!state?.diceCount || !state?.diceSides) {
+  //     return bot.sendMessage(chatId, '⚠️ Ошибка: не все параметры выбраны. Начните сначала.', {
+  //       reply_markup: getDiceCountKeyboard()
+  //     });
+  //   }
+    
+  //   // Сохраняем режим и считаем результат
+  //   state.diceMode = mode;
+
+  //     // 🔹 Создаём объект "последнего броска" для повторного использования
+  //   state.lastCustomRoll = {
+  //     parsed: {
+  //       diceGroups: [{ count: state.diceCount, sides: state.diceSides }],
+  //       modifier: 0,
+  //       original: `${state.diceCount}d${state.diceSides}`
+  //     },
+  //     mode: state.diceMode
+  //   };
+    
+  //   // Считаем результат
+  //   const result = calculateDiceRoll(state.diceCount, state.diceSides, state.diceMode);
+  //   const text = formatDiceResult(result);
+    
+  //   // 🔹 ОТПРАВЛЯЕМ РЕЗУЛЬТАТ НОВЫМ СООБЩЕНИЕМ
+  //   await bot.sendMessage(chatId, text, {
+  //     parse_mode: 'HTML',
+  //     reply_markup: getDiceResultKeyboard()
+  //   });
+    
+  //   // Сбрасываем состояние кубиков
+  //   delete userState[chatId].diceCount;
+  //   delete userState[chatId].diceSides;
+  //   delete userState[chatId].diceMode;
+  //   userState[chatId].step = 'main';
+    
+  //   return;
+  // }
+    // Выбор режима броска — ФИНАЛЬНЫЙ ШАГ
+  if (data.startsWith('dice_mode_')) {
+    const mode = data.split('_')[2]; // normal, adv, dis
+    const state = userState[chatId];
+    
+    if (!state?.diceCount || !state?.diceSides) {
+      return bot.sendMessage(chatId, '⚠️ Ошибка: не все параметры выбраны. Начните сначала.', {
+        reply_markup: getDiceCountKeyboard()
+      });
+    }
+    
+    // 🔹 ИСПОЛЬЗУЕМ calculateSimpleRoll для пошагового выбора
+    const result = calculateSimpleRoll(state.diceCount, state.diceSides, mode);
+    
+    // Сохраняем для повторного броска
+    state.lastCustomRoll = {
+      parsed: result.parsed,
+      mode: mode
+    };
+    
+    const text = formatDiceResult(result);
+    
+    await bot.sendMessage(chatId, text, {
+      parse_mode: 'HTML',
+      reply_markup: getDiceResultKeyboard()
+    });
+    
+    userState[chatId].step = 'main';
+    return;
+  }
+
+
+
+
+
+  
+  // Кнопка "Назад" от выбора типа к выбору количества
+  if (data === 'dice_step_back_count') {
+    userState[chatId] = { ...userState[chatId], step: 'dice_count' };
+    return bot.sendMessage(chatId, '🎲 <b>Шаг 1/3:</b> Выберите количество кубиков:', {
+      parse_mode: 'HTML',
+      reply_markup: getDiceCountKeyboard()
+    });
+  }
+  
+  // Кнопка "Назад" от выбора режима к выбору типа
+  if (data === 'dice_step_back_type') {
+    userState[chatId] = { ...userState[chatId], step: 'dice_type' };
+    return bot.sendMessage(chatId, `🎲 <b>Шаг 2/3:</b> Выберите тип кубика (выбрано: ${userState[chatId].diceCount} шт.):`, {
+      parse_mode: 'HTML',
+      reply_markup: getDiceTypeKeyboard()
+    });
+  }
+  
+  // Повторный бросок с теми же параметрами
+  if (data === 'dice_restart') {
+    const lastRoll = userState[chatId]?.lastCustomRoll;
+    
+    if (lastRoll?.parsed) {
+      // Считаем результат с сохранёнными параметрами
+      const result = rollParsedExpression(lastRoll.parsed, lastRoll.mode);
+      const text = formatDiceResult(result);
+      return bot.sendMessage(chatId, text, {
+        parse_mode: 'HTML',
+        reply_markup: getDiceResultKeyboard()
+      });
+    }
+    // Если параметры не сохранены — начинаем сначала
+    userState[chatId] = { step: 'dice_count' };
+    return bot.sendMessage(chatId, '🎲 <b>Шаг 1/3:</b> Выберите количество кубиков:', {
+      parse_mode: 'HTML',
+      reply_markup: getDiceCountKeyboard()
+    });
+  }
+
+    // Кнопка "Ввести формулу" — подсказка
+  if (data === 'dice_custom_input') {
+    return bot.sendMessage(chatId, 
+      '✍️ <b>Введите формулу в чат:</b>\n' +
+      '<code>2d6</code> — два шестигранника\n' +
+      '<code>1d20+5</code> — d20 с модификатором +5\n' +
+      '<code>2d6+3d4-1</code> — сложная формула\n' +
+      '<code>4d6k3</code> — 4d6, оставить 3 лучших (скоро!)',
+      { parse_mode: 'HTML', reply_markup: getBackKeyboard() }
+    );
+  }
+
+
+    // Устаревшие кнопки (для совместимости)
+  if (data === 'dice_old_menu' || (data.startsWith('dice_') && !data.startsWith('dice_count_') && !data.startsWith('dice_type_') && !data.startsWith('dice_mode_'))) {
     return handleDice(chatId, msgId, data);
   }
 
@@ -407,43 +593,262 @@ bot.on('callback_query', async (cb) => {
   }
 });
 
+
+
+
 // =============================================================================
-// ЛОГИКА КУБИКОВ
+// ЛОГИКА БРОСКА КУБИКОВ
 // =============================================================================
 
-function handleDice(chatId, msgId, data) {
-  if (data === 'dice_menu') {
-    return safeEdit(chatId, msgId, '🎲 Выберите кубик или введите вручную (напр. <code>3d6</code>):', { 
-      parse_mode: 'HTML', 
-      reply_markup: getDiceKeyboard() 
-    });
-  }
-
-  let rolls, total;
-  if (data === 'dice_2_20_adv') {
-    const r1 = Math.floor(Math.random() * 20) + 1;
-    const r2 = Math.floor(Math.random() * 20) + 1;
-    rolls = [r1, r2];
-    total = Math.max(r1, r2);
-  } else {
-    const parts = data.split('_');
-    if (parts.length < 3) return;
-    const count = parseInt(parts[1]);
-    const sides = parseInt(parts[2]);
-    
-    rolls = []; 
-    total = 0;
-    for (let i = 0; i < count; i++) {
+function calculateDiceRoll(count, sides, mode = 'normal') {
+  const rolls = [];
+  
+  for (let i = 0; i < count; i++) {
+    if (mode === 'adv') {
+      // Преимущество: бросаем 2 кубика, берём лучший
+      const r1 = Math.floor(Math.random() * sides) + 1;
+      const r2 = Math.floor(Math.random() * sides) + 1;
+      rolls.push({ value: Math.max(r1, r2), details: [r1, r2] });
+    } else if (mode === 'dis') {
+      // Помеха: бросаем 2 кубика, берём худший
+      const r1 = Math.floor(Math.random() * sides) + 1;
+      const r2 = Math.floor(Math.random() * sides) + 1;
+      rolls.push({ value: Math.min(r1, r2), details: [r1, r2] });
+    } else {
+      // Обычный бросок
       const r = Math.floor(Math.random() * sides) + 1;
-      rolls.push(r); 
-      total += r;
+      rolls.push({ value: r, details: [r] });
     }
   }
   
-  return safeEdit(chatId, msgId, `🎲 Результат: <b>${total}</b>\n📊 Броски: [${rolls.join(', ')}]`, { 
-    parse_mode: 'HTML', 
-    reply_markup: getDiceKeyboard() 
+  const total = rolls.reduce((sum, roll) => sum + roll.value, 0);
+  
+  return {
+    total,
+    rolls,
+    count,
+    sides,
+    mode
+  };
+}
+
+function formatDiceResult(result) {
+  const modeLabels = {
+    normal: '🎲 Обычный',
+    adv: '✅ Преимущество',
+    dis: '❌ Помеха'
+  };
+  
+  const modeLabel = modeLabels[result.mode] || '🎲';
+  const diceNotation = `${result.count}d${result.sides}`;
+  
+  // Формируем строку с деталями бросков
+  let details = '';
+  if (result.mode === 'normal') {
+    details = result.rolls.map(r => r.value).join(', ');
+  } else {
+    details = result.rolls.map(r => {
+      const [r1, r2] = r.details;
+      const chosen = r.value;
+      return `[${r1}, ${r2}] → ${chosen}`;
+    }).join(' | ');
+  }
+  
+  return `🎲 <b>Результат: ${result.total}</b>
+📊 ${diceNotation} • ${modeLabel}
+📋 Броски: ${details}`;
+}
+
+
+
+
+
+
+// =============================================================================
+// ЛОГИКА БРОСКА КУБИКОВ — ОБНОВЛЁННАЯ
+// =============================================================================
+
+// Парсинг кастомного выражения: "2d6+3d4-1", "1d20+5", "4d6"
+function parseDiceExpression(expr) {
+  // Убираем пробелы, приводим к нижнему регистру
+  expr = expr.replace(/\s/g, '').toLowerCase();
+  
+  // Паттерн для поиска групп кубиков: 2d6, 3d20, 1d100
+  const dicePattern = /(\d+)d(\d+)/gi;
+  // Паттерн для модификатора в конце: +5, -3, +10
+  const modPattern = /([+-]\d+)$/;
+  
+  const diceGroups = [];
+  let match;
+  
+  // Извлекаем все группы кубиков
+  while ((match = dicePattern.exec(expr)) !== null) {
+    diceGroups.push({
+      count: parseInt(match[1]),
+      sides: parseInt(match[2])
+    });
+  }
+  
+  // Если не найдено ни одной группы — выражение невалидно
+  if (diceGroups.length === 0) {
+    return null;
+  }
+  
+  // Извлекаем модификатор, если есть
+  const modMatch = expr.match(modPattern);
+  const modifier = modMatch ? parseInt(modMatch[1]) : 0;
+  
+  return { diceGroups, modifier, original: expr };
+}
+
+// Расчёт результата для распарсенного выражения
+function rollParsedExpression(parsed, mode = 'normal') {
+  let total = 0;
+  const rollDetails = [];
+  
+  for (const group of parsed.diceGroups) {
+    const { count, sides } = group;
+    const groupRolls = [];
+    
+    for (let i = 0; i < count; i++) {
+      if (mode === 'adv') {
+        // Преимущество: 2 броска, берём лучший
+        const r1 = Math.floor(Math.random() * sides) + 1;
+        const r2 = Math.floor(Math.random() * sides) + 1;
+        groupRolls.push({ value: Math.max(r1, r2), raw: [r1, r2] });
+      } else if (mode === 'dis') {
+        // Помеха: 2 броска, берём худший
+        const r1 = Math.floor(Math.random() * sides) + 1;
+        const r2 = Math.floor(Math.random() * sides) + 1;
+        groupRolls.push({ value: Math.min(r1, r2), raw: [r1, r2] });
+      } else {
+        // Обычный бросок
+        const r = Math.floor(Math.random() * sides) + 1;
+        groupRolls.push({ value: r, raw: [r] });
+      }
+    }
+    
+    const groupSum = groupRolls.reduce((sum, roll) => sum + roll.value, 0);
+    total += groupSum;
+    
+    // Формируем строку деталей для этой группы
+    const groupDetail = groupRolls.map(roll => {
+      if (mode === 'normal') {
+        return roll.value;
+      } else {
+        const [r1, r2] = roll.raw;
+        return `[${r1},${r2}]→${roll.value}`;
+      }
+    }).join(',');
+    
+    rollDetails.push(`${count}d${sides}: [${groupDetail}] = ${groupSum}`);
+  }
+  
+  // Применяем модификатор
+  if (parsed.modifier !== 0) {
+    total += parsed.modifier;
+    rollDetails.push(`мод: ${parsed.modifier >= 0 ? '+' : ''}${parsed.modifier}`);
+  }
+  
+  return {
+    total,
+    rollDetails,
+    parsed: parsed,
+    mode
+  };
+}
+
+// Форматирование результата для отправки
+function formatDiceResult(result) {
+  const modeLabels = {
+    normal: '🎲 Обычный',
+    adv: '✅ Преимущество', 
+    dis: '❌ Помеха'
+  };
+  
+  const modeLabel = modeLabels[result.mode] || '🎲';
+  const expr = result.parsed?.original || `${result.count || 1}d${result.sides || 6}`;
+  const details = Array.isArray(result.rollDetails) 
+    ? result.rollDetails.join(' | ') 
+    : (result.details || '—');
+  
+  return `🎲 <b>Результат: ${result.total}</b>
+📊 Формула: <code>${expr}</code> • ${modeLabel}
+📋 Детали: ${details}`;
+}
+
+
+// Расчёт для пошагового выбора (простой режим без парсинга)
+function calculateSimpleRoll(count, sides, mode = 'normal') {
+  const rolls = [];
+  
+  for (let i = 0; i < count; i++) {
+    if (mode === 'adv') {
+      const r1 = Math.floor(Math.random() * sides) + 1;
+      const r2 = Math.floor(Math.random() * sides) + 1;
+      rolls.push({ value: Math.max(r1, r2), raw: [r1, r2] });
+    } else if (mode === 'dis') {
+      const r1 = Math.floor(Math.random() * sides) + 1;
+      const r2 = Math.floor(Math.random() * sides) + 1;
+      rolls.push({ value: Math.min(r1, r2), raw: [r1, r2] });
+    } else {
+      const r = Math.floor(Math.random() * sides) + 1;
+      rolls.push({ value: r, raw: [r] });
+    }
+  }
+  
+  const total = rolls.reduce((sum, roll) => sum + roll.value, 0);
+  const rollDetails = rolls.map(roll => {
+    if (mode === 'normal') {
+      return roll.value;
+    } else {
+      const [r1, r2] = roll.raw;
+      return `[${r1},${r2}]→${roll.value}`;
+    }
+  }).join(', ');
+  
+  // 🔹 ВОЗВРАЩАЕМ объект в формате, совместимом с formatDiceResult
+  return {
+    total,
+    rollDetails: [`${count}d${sides}: [${rollDetails}] = ${total}`],
+    parsed: {
+      diceGroups: [{ count, sides }],
+      modifier: 0,
+      original: `${count}d${sides}`
+    },
+    mode,
+    count,
+    sides
+  };
+}
+
+
+
+// Обработка текстового ввода кубиков (кастомные выражения)
+function handleCustomDiceInput(chatId, text) {
+  const parsed = parseDiceExpression(text);
+  
+  if (!parsed) {
+    return false; // Не валидное выражение
+  }
+  
+  // Сохраняем последнее выражение в состоянии пользователя
+  if (!userState[chatId]) userState[chatId] = {};
+  userState[chatId].lastCustomRoll = {
+    parsed,
+    mode: 'normal' // по умолчанию обычный режим
+  };
+  
+  // Считаем результат
+  const result = rollParsedExpression(parsed, 'normal');
+  
+  // Отправляем результат НОВЫМ сообщением
+  bot.sendMessage(chatId, formatDiceResult(result), {
+    parse_mode: 'HTML',
+    reply_markup: getDiceResultKeyboard()
   });
+  
+  return true;
 }
 
 // =============================================================================
