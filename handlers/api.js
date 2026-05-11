@@ -12,10 +12,11 @@ const API_ENDPOINTS = {
 };
 
 const fetchList = async (endpoint, page = 1) => {
+    const LIMIT = 10;
     const { data } = await axios.get(`${BASE_URL}${endpoint}`, {
         params: {
-            limit: 10,
-            offset: (page - 1) * limit
+            limit: LIMIT,
+            offset: (page - 1) * LIMIT
         }
     });
     return data;
