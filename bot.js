@@ -89,25 +89,34 @@ function rollDice(expr) {
 // =============================================================================
 
 // Показ списка элементов категории с пагинацией
+// Показ списка элементов категории с пагинацией
+// Показ списка элементов категории с пагинацией
 async function showList(chatId, msgId, title, endpoint, page) {
   try {
     const LIMIT = 10;
+    
+    // 1. Запрос к API (без параметров пагинации, так как API может их игнорировать)
+    const res = await axios.get(`${API_BASE}/${endpoint}`);
+    
+    const allItems = Array.isArray(res.data.results) ? res.data.results : [];
+    const totalCount = res.data.count ?? allItems.length;
+    
+    if (allItems.length === 0) {
+      return bot.sendMessage(chatId, `📭 ${title}: элементы не найдены.`);
+    }
+    
+    // 2. КЛИЕНТСКАЯ ПАГИНАЦИЯ: берём только нужные 10 элементов для текущей страницы
     const offset = (page - 1) * LIMIT;
+    const items = allItems.slice(offset, offset + LIMIT);
     
-    const res = await axios.get(`${API_BASE}/${endpoint}`, { 
-      params: { limit: LIMIT, offset } 
-    });
-    
-    const items = res.data.results;
-    const totalCount = res.data.count ?? items.length;
-
-    // Кнопки элементов
+    // 3. Формируем кнопки элементов
+    // Каждая кнопка — это отдельная строка в массиве: [[{btn1}], [{btn2}], ...]
     const buttons = items.map(item => [{
       text: item.name,
       callback_data: `select__${endpoint}__${item.index}`
     }]);
-
-    // Кнопки пагинации
+    
+    // 4. Кнопки пагинации
     const pagination = [];
     if (page > 1) {
       pagination.push({ 
@@ -115,32 +124,43 @@ async function showList(chatId, msgId, title, endpoint, page) {
         callback_data: `page__${endpoint}__${page - 1}` 
       });
     }
-    if (items.length === LIMIT || offset + LIMIT < totalCount) {
+    // Показываем "Вперёд", если есть ещё элементы после текущей страницы
+    if (offset + LIMIT < totalCount) {
       pagination.push({ 
         text: 'Вперёд ➡️', 
         callback_data: `page__${endpoint}__${page + 1}` 
       });
     }
-
+    
+    // 5. Кнопка "В меню" — ПРАВИЛЬНАЯ СТРУКТУРА
+    // backBtn — это уже массив (строка клавиатуры), поэтому не оборачиваем его ещё раз в []
+    const backBtn = [{ text: '🔙 В меню', callback_data: 'back_to_main' }];
+    
+    // 6. Собираем клавиатуру
     const keyboard = {
       inline_keyboard: [
-        ...buttons,
-        ...(pagination.length ? [pagination] : []),
-        [{ text: '🔙 В меню', callback_data: 'back_to_main' }]
+        ...buttons,                    // строки с элементами
+        ...(pagination.length > 0 ? [pagination] : []), // строка с пагинацией (если есть)
+        backBtn                        // строка с кнопкой "В меню"
       ]
     };
-
-    const pageInfo = totalCount > LIMIT 
-      ? ` (стр. ${page} из ${Math.ceil(totalCount / LIMIT)})` 
-      : '';
-      
-    return safeEdit(chatId, msgId, `📚 ${title}${pageInfo}:\nВыберите элемент:`, { 
+    
+    const totalPages = Math.ceil(totalCount / LIMIT);
+    const messageText = `📚 ${title} (стр. ${page} из ${totalPages}):\nВыберите элемент:`;
+    
+    // 7. Отправляем НОВОЕ сообщение (не редактируем старое)
+    const sentMsg = await bot.sendMessage(chatId, messageText, { 
       reply_markup: keyboard,
       parse_mode: 'HTML'
     });
     
+    // 8. Удаляем старое сообщение при переключении страниц, чтобы не было дублей
+    if (msgId && page > 1) {
+      bot.deleteMessage(chatId, msgId).catch(() => {});
+    }
+    
   } catch (err) {
-    console.error(`[LIST ERROR] ${endpoint} page ${page}:`, err.message);
+    console.error(`[showList] ❌ ОШИБКА: ${endpoint} page ${page}:`, err.message);
     bot.sendMessage(chatId, `⚠️ Ошибка загрузки "${title}". Попробуйте позже.`);
   }
 }
@@ -269,6 +289,16 @@ bot.on('callback_query', async (cb) => {
   const msgId = cb.message.message_id;
   const data = cb.data;
 
+
+  // 🔍 Глобальный лог
+  console.log(`\n[CB] === НОВЫЙ ЗАПРОС ===`);
+  console.log(`[CB] chatId=${chatId}, msgId=${msgId}`);
+  console.log(`[CB] data="${data}"`);
+  console.log(`[CB] userState:`, userState[chatId]);
+
+
+
+
   await bot.answerCallbackQuery(cb.id);
   
   // === ОБРАБОТКА ПОИСКА: выбор заклинания из списка ===
@@ -337,8 +367,18 @@ bot.on('callback_query', async (cb) => {
   };
 
   if (categories[data]) {
+    console.log(`[CB] Категория выбрана: ${data}`);
     userState[chatId] = { category: data, page: 1 };
-    return showList(chatId, msgId, categories[data], data, 1);
+        try {
+      // Принудительно вызываем с явными параметрами
+      await showList(chatId, msgId, categories[data], data, 1);
+      console.log(`[CB] ✅ showList отработал для ${data}`);
+    } catch (err) {
+      console.error(`[CB] ❌ КРИТИЧЕСКАЯ ОШИБКА при вызове showList:`, err);
+      bot.sendMessage(chatId, `⚠️ Ошибка загрузки списка: ${err.message}`);
+    }
+    return;
+    //return showList(chatId, msgId, categories[data], data, 1);
   }
 
   // === ПАГИНАЦИЯ КАТЕГОРИЙ ===
